@@ -1,0 +1,252 @@
+---
+title: 'Forecasting Soybean Futures Price: Prophet & VAR'
+author: "Andrew Argeros - Hamline University School of Business"
+date: November 9, 2019
+output: 
+  html_document:
+    toc: true
+    tod_depth: 2
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+require(htmlTable) 
+require(dplyr)
+require(DT)
+require(ggplot2)
+require(prophet)
+require(dygraphs)
+require(tsDyn)
+require(icon)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This work was done for the 2019 MinneMUDAC data science challange in Eden Prairie, Minnesota. The project included collaborators Lindsey Hawk and Lindsay Steiger. From the competition, our team from Hamline University used a machine learning esemble of Facebook Prophet and Vector Autoregression and finsihed in second place of more than seventy-five competing teams. 
+
+
+## Background
+
+The challange sponsor of the 2019 challage was FarmFemmes, a corporation working to advance the use of data science in the agriculture sector. The topic of the competition focused on agriculture, specifically soy and its respective futures contracts. 
+
+Futures contracts are valuations of the future implicit value of soybeans, and are contracts for 5000 bushels of soybeans. The contracts are priced in 1/100 of the USD such that a value of 1000 would be akin to $10. 
+
+In looking where soybeans are farmed, we can see the following heat map. The darker red colors are states where soybeans are farmed.
+
+<center>
+![](Heat Map.PNG) 
+</center>
+
+These being: Illinois, Iowa, Minnesota, and the Dakotas. Typically, these are harvested in late September on large scale farms using state-of-the-art agricultural technologies such as drones, combines, and computer vision fertilization. 
+
+The data provided for the competition was time series data on three soybean futures contracts: `ZSH20` (March), `ZSK20` (May), and `ZSN20` (July). 
+
+### Data
+
+**This is an example of the provided data for the `ZSH20` contract:**
+
+```{r march data, echo=FALSE}
+
+march = read.csv("SoybeanMarch2020.csv") 
+march = march %>% rename("Date" = ï..Date) 
+march = march[1:452,]
+
+datatable(march, rownames = FALSE, filter="top", options = list(pageLength = 5, scrollX=T)) 
+
+h = head(march, 1)[1]
+t = tail(march, 1)[1]
+```
+
+The data contains the Open and Close (EOD) prices, as well as the daily high and low prices from `r h` to `r t`. This amounts to `r nrow(march)` observations. However, because of the competition being held November 3rd, 2019, the closing prices from 09/03/2019 (the next trading day) to 11/01/2019 were scraped from [RockRiverAg](http://www.rockriverag.com/markets.aspx?c=ZSN20&cn=Soybeans) and apended to the data set. 
+
+Then, to get a fuller view of the soybean market, we scraped the same site for the generalized commodity prices for Corn, Ethanol, and Steel. This allowed our final data frame to contain the following: 
+
+* `ZSH20` Closing Price
+* `ZSK20` Closing Price
+* `ZSN20` Closing Price 
+* Corn Generalized Price
+* Ethanol Generalized Price
+* Global Steel Generalized Price 
+
+We then used Excel to add stagnant data for the missing days in the data set. These dates were holidays and weekends, days when the commodities market is closed, thus the price is equal to the closing price of the last trading day. 
+
+**This is an example of the final, `mudac` data frame used for analysis:**
+```{r final data, echo=FALSE}
+mudac = read.csv("marchwsteelWEEKENDS.csv", header = TRUE)
+mudac = mudac %>% rename("Date" = ï..Date) 
+datatable(mudac, rownames = FALSE, filter="top", options = list(pageLength = 5, scrollX=T)) 
+```
+## Model Architecture 
+
+To give a breif overview of our algorithm and its application for the 2019 MinneMUDAC challange, the below flowchart shows the process used to forecast soybean futures. Each commodity was individually passed through the Facebook Prophet algorithm, then the fitted, or transformed values were extracted, and passed jointly through a Vector Autoregression which was used to forecast each contract indvidually. Using Prophet allowed us to strip away the noise in the data and utilize the robust time series components, while the VAR allowed for a more robust forecast that utilized other commodities chosen for their endogeneity and economic similarity. 
+
+<center>
+![](modelarc.png)
+</center>
+
+## Analysis 
+
+In looking at the variation in daily soybean closing price, there was typically only slight variation from day to day, with a few steep rises or drops in accordance with the following graphs:  
+
+```{r ggplot of trends, echo=FALSE, out.width=c('33.33%', '33.33%', '33.34%'), fig.show='hold'}
+plot.ts(mudac$marchSoybean, main="March", ylab="Closing Price")
+plot.ts(mudac$maySoybean, main="May", ylab="Closing Price")
+plot.ts(mudac$julySoybean, main="July", ylab="Closing Price")
+```
+
+this meant that an autoregressive model was likely the best fit for the analysis of our data. For this we first turned to Facebook prophet. Prophet is an open-source, tunable, time-series based algorithm developed by two Facebook data scientist. The algorithm is based on Bayesean structural time-series analysis and contains several hyperparameters useful for dynamic trends, such as a growth function to account for changes in the overall trend, a fourier transform-like model to account for seasonality, and a Baysean model to control for holidays (non-trading days in our case). 
+
+In our ensemble, each commodity was individually restructured to the required format for Prophet with the `Date` variable, and passed through the algorithm with seasonality hyperparameters turned on at the `yearly`,`monthly`, and `daily` levels. This process was done in the following for-loop. 
+
+**For-loop for Prophet:**
+```{r Prophet loop}
+fcast.pers = 1 # this is a trimming value [set to 1]
+proph.var = c()
+for(i in 2:7){ # this is a for-loop to turn the other commodity data into prophet forcasts
+  date = mudac$Date
+  y.m.d = format(as.Date(date, "%m/%d/%Y"), '%Y-%m-%d') # prophet requires ds to be %Y-%m-%d instead of mdy
+  mudac$ymd = y.m.d
+  varns = variable.names(mudac)[i]
+  mudac.p = mudac[,c("ymd",varns)]
+  mudac.p
+  mudac.p$ds = y.m.d 
+  mudac.p$y = mudac.p[,2] 
+  d = mudac.p[,c("ds","y")] # prophet requires names "ds" for datestamp and "y" for time series variable
+  pro = prophet(d, yearly.seasonality = TRUE, weekly.seasonality = TRUE, daily.seasonality = TRUE)
+  future = make_future_dataframe(pro, periods = fcast.pers)
+  forecast = predict(pro, future) #creates predictions
+  proph.var = cbind(proph.var, forecast$yhat)
+}
+
+proph.var = as.data.frame(proph.var)
+proph.var = proph.var[1:(dim(proph.var)[1]-fcast.pers),] # since prophet makes future predictions, fcast.pers is future data that is removed
+
+proph.var = proph.var %>% rename("corn" = V1, 
+                                 "ethanol" = V2, 
+                                 "steel" = V3,
+                                 "march.soy" = V4,
+                                 "may.soy" = V5,
+                                 "july.soy" = V6) # used to rename the variables back into their proper form
+
+proph.var$ds = y.m.d # adds the date to the data frame
+```
+
+This process created a data frame of fitted values from Prophet, or what the algorithm would have predicted the price to be for the given dates. This allowed us to strip away the noise in the data and focus into the actual, predictable trend of the time series. To show this, Prophet contains a data visualization tool, `prophet_plot_components()` to show the compontents of the data. 
+
+**Prophet Plot Components Analysis**
+```{r Prophet Plot, echo=FALSE}
+par(mfrow=c(1,2))
+prophet_plot_components(pro, forecast) # shows component seasonality 
+dyplot.prophet(pro, forecast)
+```
+The interactive graph shows the fitted values with a 95% confidence interval surrounding it, while the other graph is the component plot. 
+
+## Vector Autoregression 
+
+Since we decided on a multivariate approach to forecasting soy futures, we employed a vector autoregression to accomplish this. Vector Autoregressions, or VARs, are autoregressive models using lags of multiple endogenous independent variables to forecast a dependent variable that is also included as an independent variable. Largely, this is performed through linear algebraic matrix multiplication in the following formula:
+
+<center>
+![](varformula.png)
+</center>
+
+For our data, the data frame of fitted values from Prophet were first converted to a matrix type, then passed jointly through a VAR. The data were converted to a matrix through the following code: 
+```{r VAR matrix}
+attach(proph.var)
+corn = proph.var$corn
+ethanol = proph.var$ethanol 
+steel = proph.var$steel
+march.soy = proph.var$march.soy
+may.soy = proph.var$may.soy
+july.soy = proph.var$july.soy
+non.diff.data = cbind(corn, 
+                      ethanol, 
+                      steel,
+                      march.soy,
+                      may.soy,
+                      july.soy) # positions the data so it can be used for create a VAR 
+```
+
+Then, since a vector autoregression uses lags to forecast the future, the number of lags needed to be determined. Our process involved minimizing the Hannan-Quinn Information Criterion, an accuracy statistic using log-likelihood to maximize accuracy while decreasing the risk of overfitting. This was able to be tested through a function in the `tsDyn` package called `tsDyn::lags.select()`. 
+
+$$HQC = -2max(L)+2k+ln(ln(n))$$ The formula for the Hannan-Quinn Information Criterion
+
+```{r VAR lags}
+lagmax = 20 # set this to a low-ish number as max possible lags
+lag.sel = lags.select(non.diff.data, lag.max = lagmax) # finds optimal number of lags by looking at min info criteria in lagmax
+lag.sel.best = lag.sel$HQ_min[2]
+```
+
+For our model, this resulted in `r lag.sel.best` lags, meaning that the price of each variable `r lag.sel.best` days before, through 1 day previous are used to predict the commodity price at a given day. 
+
+Then, the actual VAR was run on the `non.diff.data` matrix, where the lag hyperparameter was tuned to `lag.sel.best`, or the optimal number of lags, `r lag.sel.best`. Since the VAR is a circular model, meaning the the target feature is also a predictor, only one regression was needed and simply adjusted for each soybean contract.
+
+```{r VAR model}
+mod.proph.var = tsDyn::lineVar(non.diff.data, lag = lag.sel.best) 
+```
+
+## Predictions
+
+As the above code fit the VAR to the data, we created predictions for 183 periods, or roughly 6 months ahead through the `n.ahead` argument. These were the predictions used for the modeling portion of the MinneMUDAC competition. This was done through the following code: 
+
+```{r VAR predictions}
+test.preds = predict(mod.proph.var, n.ahead = 183) 
+preds = as.data.frame(test.preds)
+preds.march = preds$march.soy 
+preds.may = preds$may.soy
+preds.july = preds$july.soy
+```
+
+For the purposes of data visualization, these prediction vectors were then attached to the fitted values of the vector autoregression. This was done to show a comparison of our model to the actual values for each contract. First, the fitted values of the target soy contracts were extracted, then `NA` values were added to the head of the each vector `r lag.sel.best` times to account for the lags in the model, then the fitted values, `fits.month.mod`, and the predictions, `preds.month` were concatenated. 
+
+```{r predictions with fitted}
+fits = as.data.frame(mod.proph.var$fitted.values) 
+fits.march = fits$march.soy
+fits.may = fits$may.soy
+fits.july = fits$july.soy # this is a vector of fitted values for soy closing 
+
+fits.march.mod = c(rep(NA, lag.sel.best), fits.march) # adds NA values to account for lag 
+fits.may.mod = c(rep(NA, lag.sel.best), fits.may)
+fits.july.mod = c(rep(NA, lag.sel.best), fits.july)
+
+predict.line.MAR = c(fits.march.mod, preds.march) # combines fitted values and preditions 
+predict.line.MAY = c(fits.may.mod, preds.may)
+predict.line.JUL = c(fits.july.mod, preds.july)
+```
+
+This allowed our algorithm to be compared to the actual values as follows: 
+
+**Line Plots of Each `ZS` (soy) Contract**
+```{r prediction line graphs, echo=FALSE}
+par(mar=c(5.1, 4.1, 4.1, 2.1)) # fits plot dimensions
+
+plot.ts(mudac$marchSoybean, xlim = c(0,length(predict.line.MAR)), ylab = "Price", main = "March Predictions") # plots actual values 
+lines(predict.line.MAR, col = "red") # this draws predictions and fitted values as a red line over scatter plot 
+
+plot.ts(mudac$maySoybean, xlim = c(0,length(predict.line.MAY)), ylab = "Price", main = "May Predictions") # plots actual values 
+lines(predict.line.MAY, col = "red") 
+
+plot.ts(mudac$julySoybean, xlim = c(0,length(predict.line.JUL)), ylab = "Price", main = "July Predictions") # plots actual values 
+lines(predict.line.JUL, col = "red")  
+```
+
+For the MinneMUDAC competition, teams were asked to provided predictions for the trading week preceeding the competition. These were the predictions we submitted: 
+
+```{r submitted predictions, echo=FALSE}
+minnemudac.preds = cbind(preds.march,
+                         preds.may,
+                         preds.july) # binds all prediction columns together for a table 
+
+mmp.head = head(minnemudac.preds, 5) # this is a table of the final predictions for the competition
+
+datatable(mmp.head, rownames = FALSE, filter="top", options = list(pageLength = 5, scrollX=T)) 
+```
+
+## Discussion
+
+Each day, these predictions were within `.5%` of the actual closing price for the three contracts. This model was making robust predictions within `1%` of the actual EOD price for over a week after the competition ended. This changed as US economic policy with China changed. As China is the major consumer of US soybeans, hightened tensions between the two nations inevitabley let to more uncertainty in the market, thus a falling price. 
+
+This change could have been modeled had closing price data been apended to the data set. This would have allowed the model to "see" the trend shift, and aptly adjust its predictions. Another analysis our team considered was a VADER sentiment analysis and text mining analysis performed on tweets as well as American and Chinese newspapers. This analysis would have allowed our model to catch the uncertainty in the market sooner, thus creating stronger predictions.
+
+---
+<center>
+*This work can also be seen on [Github](https://github.com/andrewargeros/minnemudac)* `r icon::fa("github")`
+</center>
